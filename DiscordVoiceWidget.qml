@@ -52,7 +52,11 @@ PluginComponent {
 
     // --- Visibility: hide pill when no active call ---
     Component.onCompleted: {
+      if (root.authenticated === false) {
+        setVisibilityOverride(true)
+      } else {
         setVisibilityOverride(false)
+      }
     }
 
     onInVoiceChanged: {
@@ -161,6 +165,7 @@ PluginComponent {
         case "auth_complete":
             authenticated = true
             authError = ""
+            if (!root.inVoice) {setVisibilityOverride(false)}
             if (msg.access_token && pluginService) {
                 pluginService.savePluginData("discordVoice", "accessToken", msg.access_token)
             }
@@ -270,6 +275,14 @@ PluginComponent {
         Row {
             spacing: -4
 
+            DankIcon {
+                visible: !root.authenticated
+                anchors.centerIn: parent
+                name: "link"
+                size: parent.width - 2
+                color: Theme.error
+            }
+
             Repeater {
                 model: {
                     if (!root.inVoice) return []
@@ -351,6 +364,13 @@ PluginComponent {
     verticalBarPill: Component {
         Column {
             spacing: -4
+            DankIcon {
+                visible: !root.authenticated
+                anchors.centerIn: parent
+                name: "link"
+                size: parent.width - 2
+                color: Theme.error
+            }
 
             Repeater {
                 model: {
