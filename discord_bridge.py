@@ -448,8 +448,25 @@ class DiscordBridge:
         # Check for errors.
         if evt == "ERROR":
             error_data = data.get("data", {})
-            log.error("Discord error: %s", error_data.get("message", data))
-            await self.server.send({"type": "error", "error": error_data.get("message", "Unknown error")})
+            message = error_data.get("message", "Unknown error")
+            log.error("Discord error: %s", message)
+
+            # If this error is the response to a pending AUTHENTICATE, the
+            # cached token is bad (expired/revoked). Clear it and ask the
+            # client to re-authorize so the UI can recover.
+            pending_cmd = self._pending.pop(nonce, None) if nonce else None
+            if pending_cmd == "AUTHENTICATE":
+                log.info("Authentication failed; clearing cached token")
+                self.tokens.clear()
+                self.authenticated = False
+                # auth_error already implies "needs re-authorization"; the
+                # QML handler clears the saved token and flips the UI into
+                # the authorize-prompt state. Don't follow with
+                # auth_required, which would wipe the error message.
+                await self.server.send({"type": "auth_error", "error": message})
+                return
+
+            await self.server.send({"type": "error", "error": message})
             return
 
         # Command responses (have nonce).

@@ -50,18 +50,21 @@ PluginComponent {
         bridgeSocket.send(cmd)
     }
 
-    // --- Visibility: hide pill when no active call ---
-    Component.onCompleted: {
-        setVisibilityOverride(false)
-    }
-
-    onInVoiceChanged: {
-        if (inVoice) {
+    // --- Visibility ---
+    // Show the pill when in a voice call (participants), or when not
+    // authenticated (login placeholder so the popout is reachable).
+    // Hide only in the steady state: authenticated + idle.
+    function updateVisibility() {
+        if (inVoice || !authenticated) {
             clearVisibilityOverride()
         } else {
             setVisibilityOverride(false)
         }
     }
+
+    Component.onCompleted: updateVisibility()
+    onInVoiceChanged: updateVisibility()
+    onAuthenticatedChanged: updateVisibility()
 
     // =====================================================================
     // Bridge process
@@ -270,6 +273,14 @@ PluginComponent {
         Row {
             spacing: -4
 
+            DankIcon {
+                visible: !root.authenticated
+                anchors.verticalCenter: parent.verticalCenter
+                name: "headset_mic"
+                size: Math.min(root.widgetThickness, 18)
+                color: root.authError ? Theme.error : Theme.surfaceVariantText
+            }
+
             Repeater {
                 model: {
                     if (!root.inVoice) return []
@@ -351,6 +362,14 @@ PluginComponent {
     verticalBarPill: Component {
         Column {
             spacing: -4
+
+            DankIcon {
+                visible: !root.authenticated
+                anchors.horizontalCenter: parent.horizontalCenter
+                name: "headset_mic"
+                size: Math.min(root.widgetThickness, 18)
+                color: root.authError ? Theme.error : Theme.surfaceVariantText
+            }
 
             Repeater {
                 model: {
