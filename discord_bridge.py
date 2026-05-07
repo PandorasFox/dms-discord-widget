@@ -741,6 +741,10 @@ class DiscordBridge:
             if not self.discord.connected:
                 if not await self._connect_discord():
                     return
+
+            if self._discord_task is None or self._discord_task.done():
+                self._discord_task = asyncio.create_task(self._discord_read_loop())
+
             nonce = await self.discord.authorize(self.client_id, OAUTH_SCOPES)
             self._pending[nonce] = "AUTHORIZE"
 
