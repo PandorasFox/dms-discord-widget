@@ -42,6 +42,14 @@ PluginComponent {
     readonly property bool isMuted: voiceSettings.mute || false
     readonly property bool isDeafened: voiceSettings.deaf || false
 
+    readonly property int userListMaxHeight: {
+        const rowHeight = 44 + Theme.spacingS
+        const byRows = 20 * rowHeight
+        const screenH = (root.parentScreen ? root.parentScreen.height : Screen.height) || 0
+        const byScreen = screenH * 0.5
+        return Math.min(byRows, byScreen)
+    }
+
     // --- Socket path ---
     readonly property string bridgeSocketPath: {
         const runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
@@ -574,56 +582,68 @@ PluginComponent {
                     spacing: Theme.spacingS
 
                     // Participant list
-                    Repeater {
-                        model: root.voiceUsers
+                    Item {
+                        id: userListContainer
+                        width: parent.width
+                        implicitHeight: Math.min(participantList.contentHeight, root.userListMaxHeight)
+                        height: implicitHeight
 
-                        Rectangle {
-                            width: parent.width
-                            height: 44
-                            radius: Theme.cornerRadius
-                            color: Theme.surfaceContainerHigh
+                        DankListView {
+                            id: participantList
+                            anchors.fill: parent
+                            clip: true
+                            model: root.voiceUsers
+                            spacing: Theme.spacingS
 
-                            Row {
-                                anchors.fill: parent
-                                anchors.margins: Theme.spacingS
-                                spacing: Theme.spacingS
-
-                                DankCircularImage {
-                                    width: 32
-                                    height: 32
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                                    fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
-                                    fallbackIcon: ""
-                                    border.width: root.speakingUsers[modelData.id] === true ? 2 : 0
-                                    border.color: Theme.success || "#4CAF50"
-                                }
-
-                                StyledText {
-                                    text: modelData.nick || modelData.username || "Unknown"
-                                    font.pixelSize: Theme.fontSizeMedium
-                                    color: Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    elide: Text.ElideRight
-                                    width: parent.width - 32 - statusRow.width - Theme.spacingS * 3
-                                }
+                            delegate: Rectangle {
+                                width: ListView.view.width
+                                height: 44
+                                radius: Theme.cornerRadius
+                                color: Theme.surfaceContainerHigh
+                                required property var modelData
 
                                 Row {
-                                    id: statusRow
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    spacing: 2
+                                    anchors.fill: parent
+                                    anchors.margins: Theme.spacingS
+                                    spacing: Theme.spacingS
 
-                                    DankIcon {
-                                        visible: modelData.self_mute || modelData.mute
-                                        name: "mic_off"
-                                        size: 16
-                                        color: Theme.error
+                                    DankCircularImage {
+                                        width: 32
+                                        height: 32
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        imageSource: root.avatarUrl(modelData.id, modelData.avatar)
+                                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
+                                        fallbackIcon: ""
+                                        border.width: root.speakingUsers[modelData.id] === true ? 2 : 0
+                                        border.color: Theme.success || "#4CAF50"
                                     }
-                                    DankIcon {
-                                        visible: modelData.self_deaf || modelData.deaf
-                                        name: "headset_off"
-                                        size: 16
-                                        color: Theme.error
+
+                                    StyledText {
+                                        text: modelData.nick || modelData.username || "Unknown"
+                                        font.pixelSize: Theme.fontSizeMedium
+                                        color: Theme.surfaceText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        elide: Text.ElideRight
+                                        width: parent.width - 32 - statusRow.width - Theme.spacingS * 3
+                                    }
+
+                                    Row {
+                                        id: statusRow
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        spacing: 2
+
+                                        DankIcon {
+                                            visible: modelData.self_mute || modelData.mute
+                                            name: "mic_off"
+                                            size: 16
+                                            color: Theme.error
+                                        }
+                                        DankIcon {
+                                            visible: modelData.self_deaf || modelData.deaf
+                                            name: "headset_off"
+                                            size: 16
+                                            color: Theme.error
+                                        }
                                     }
                                 }
                             }
