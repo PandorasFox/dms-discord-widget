@@ -17,6 +17,7 @@ PluginComponent {
     property bool bridgeReady: false
     property bool authenticated: false
     property string authError: ""
+    property bool discordConnected: false
 
     // --- Voice state ---
     property var currentChannel: null
@@ -207,6 +208,11 @@ PluginComponent {
         case "auth_complete":
             authenticated = true
             authError = ""
+            discordConnected = true
+            break
+
+        case "discord_status":
+            discordConnected = msg.connected === true
             break
 
         case "auth_error":
@@ -241,6 +247,7 @@ PluginComponent {
 
         case "disconnected":
             authenticated = false
+            discordConnected = false
             currentChannel = null
             voiceUsers = []
             speakingUsers = {}
@@ -512,17 +519,33 @@ PluginComponent {
                     spacing: Theme.spacingM
 
                     DankIcon {
+                        id: authIcon
                         anchors.horizontalCenter: parent.horizontalCenter
-                        name: "link"
+                        name: root.discordConnected || root.authError.length > 0 ? "link" : "sync"
                         size: 48
-                        color: Theme.surfaceVariantText
+                        color: root.authError ? Theme.error : Theme.surfaceVariantText
+
+                        RotationAnimator on rotation {
+                            from: 0
+                            to: 360
+                            duration: 1000
+                            loops: Animation.Infinite
+                            running: !root.discordConnected && root.authError.length === 0
+
+                            onRunningChanged: {
+                                if (!running)
+                                    authIcon.rotation = 0;
+                            }
+                        }
                     }
 
                     StyledText {
                         width: parent.width
-                        text: root.authError
-                              ? root.authError
-                              : "Connect to Discord to see voice channel participants and control mute/deafen."
+                        text: {
+                            if (root.authError) return root.authError
+                            if (!root.discordConnected) return "Discord isn't running. It will connect automatically once Discord starts."
+                            return "Connect to Discord to see voice channel participants and control mute/deafen."
+                        }
                         color: root.authError ? Theme.error : Theme.surfaceVariantText
                         font.pixelSize: Theme.fontSizeMedium
                         horizontalAlignment: Text.AlignHCenter
@@ -530,6 +553,7 @@ PluginComponent {
                     }
 
                     Rectangle {
+                        visible: root.discordConnected || root.authError.length > 0
                         anchors.horizontalCenter: parent.horizontalCenter
                         width: authRow.width + Theme.spacingL * 2
                         height: authRow.height + Theme.spacingM * 2
