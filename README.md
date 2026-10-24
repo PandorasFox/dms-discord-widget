@@ -20,6 +20,14 @@ Requires DMS 1.5+ and `python3` (3.10+).
 3. Click **Authorize Discord** — Discord will show a consent dialog
 4. Once authorized, the widget auto-connects on future launches
 
+## Supported clients
+
+The widget connects to the client's local IPC socket, which only the
+official Discord client exposes — Stable, PTB, and Canary are all
+supported. Third-party clients (Vesktop, Legcord, Equibop, WebCord, ...)
+wrap the web app and do not create the IPC socket, so the widget cannot
+get voice state from them.
+
 ## Keybind Integration
 
 The plugin registers an IPC handler at target `discord`:
