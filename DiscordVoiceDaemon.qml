@@ -11,9 +11,6 @@ import qs.Common
 Item {
     id: root
 
-    property var pluginService: null
-    property string pluginId: "discordVoice"
-
     // --- Voice state (tracked for the IPC handler) ---
     property bool authenticated: false
     property var currentChannel: null

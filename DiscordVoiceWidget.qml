@@ -11,10 +11,7 @@ PluginComponent {
 
     layerNamespacePlugin: "discord-voice"
 
-    property var popoutService: null
-
     // --- Bridge state ---
-    property bool bridgeReady: false
     property bool authenticated: false
     property string authError: ""
     property bool discordConnected: false
@@ -26,17 +23,7 @@ PluginComponent {
     property var speakingUsers: ({})
 
     // --- Settings ---
-    readonly property string clientId: "207646673902501888"
     readonly property int maxBarAvatars: parseInt(pluginData.maxBarAvatars) || 5
-
-    // On DMS >= 1.5 the daemon surface owns the bridge process and the IPC
-    // handler (it survives bar reloads on monitor sleep/wake; a per-widget
-    // IpcHandler leaves a stale "discord" target behind when its bar window
-    // is destroyed). On older DMS without composite plugin support this is
-    // false and the widget self-hosts both, as before.
-    readonly property bool daemonMode: !!(pluginService
-        && pluginService.pluginDaemonComponents
-        && pluginService.pluginDaemonComponents["discordVoice"])
 
     // --- Computed ---
     readonly property bool inVoice: currentChannel !== null && currentChannel !== undefined
@@ -65,17 +52,7 @@ PluginComponent {
 
     // Never log OAuth tokens: on systemd setups console output lands in
     // the journal, where any journal reader could lift a live token.
-    function redactForLog(msg) {
-        if (!msg || typeof msg !== "object") return JSON.stringify(msg)
-        const copy = Object.assign({}, msg)
-        for (const key of ["token", "access_token"]) {
-            if (copy[key]) copy[key] = "<redacted>"
-        }
-        return JSON.stringify(copy)
-    }
-
     function sendBridgeCommand(cmd) {
-        console.warn("DiscordVoice: sendBridgeCommand", redactForLog(cmd))
         bridgeSocket.send(cmd)
     }
 
@@ -96,78 +73,12 @@ PluginComponent {
     onAuthenticatedChanged: updateVisibility()
 
     // =====================================================================
-    // Bridge process
-    // =====================================================================
-
-    Process {
-        id: bridgeProcess
-        command: ["python3", Qt.resolvedUrl("discord_bridge.py").toString().replace("file://", ""), root.bridgeSocketPath, root.clientId]
-        running: false
-
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text && text.trim()) {
-                    console.warn("DiscordVoice bridge:", text.trim())
-                }
-            }
-        }
-
-        onExited: (exitCode) => {
-            // Exit 0 means another bridge instance already owns the socket;
-            // just keep using it as a client.
-            if (exitCode === 0) return
-            console.warn("DiscordVoice bridge exited:", exitCode)
-            root.bridgeReady = false
-            root.authenticated = false
-            root.currentChannel = null
-            root.voiceUsers = []
-            bridgeRestartTimer.start()
-        }
-    }
-
-    // Start bridge after a short delay so the socket path is ready
-    // before DankSocket tries to connect. In daemon mode the daemon
-    // surface owns the process instead.
-    Timer {
-        id: bridgeStartTimer
-        interval: 100
-        running: true
-        onTriggered: {
-            if (!root.daemonMode) {
-                bridgeProcess.running = true
-            }
-        }
-    }
-
-    Timer {
-        id: bridgeRestartTimer
-        interval: 3000
-        onTriggered: bridgeProcess.running = true
-    }
-
-    // Legacy-mode watchdog: if the widget instance that owned the bridge
-    // process was destroyed (bar reload on monitor sleep/wake), surviving
-    // instances bring the bridge back up. Safe against races - extra
-    // bridge processes exit immediately when the socket is already owned.
-    Timer {
-        interval: 5000
-        repeat: true
-        running: !root.daemonMode
-        onTriggered: {
-            if (!bridgeSocket.linkUp && !bridgeProcess.running) {
-                bridgeProcess.running = true
-            }
-        }
-    }
-
-    // =====================================================================
-    // DankSocket connection to bridge
+    // DankSocket connection to bridge (the daemon surface owns the process)
     // =====================================================================
 
     DankSocket {
         id: bridgeSocket
         path: root.bridgeSocketPath
-        // Don't connect until bridge has had time to start.
         connected: false
 
         parser: SplitParser {
@@ -183,9 +94,9 @@ PluginComponent {
         }
     }
 
-    // Connect socket after the bridge (ours or the daemon's) has had time
-    // to create its socket file. DankSocket retries with backoff until the
-    // bridge is up, so a fixed delay is safe in both modes.
+    // Connect socket after the daemon's bridge has had time to create its
+    // socket file. DankSocket retries with backoff until the bridge is up,
+    // so a fixed delay is safe.
     Timer {
         id: socketConnectTimer
         interval: 800
@@ -201,10 +112,8 @@ PluginComponent {
     // =====================================================================
 
     function handleBridgeMessage(msg) {
-        console.warn("DiscordVoice: bridge msg:", redactForLog(msg))
         switch (msg.type) {
         case "ready":
-            bridgeReady = true
             bridgeSocket.send({cmd: "connect"})
             break
 
@@ -268,63 +177,7 @@ PluginComponent {
     }
 
     // =====================================================================
-    // IPC Handler (for keybinds: dms ipc call discord ...)
-    // Legacy mode only - in daemon mode the daemon surface registers it,
-    // since a handler tied to a bar widget goes stale when bar windows are
-    // recreated on monitor sleep/wake.
-    // =====================================================================
-
-    Loader {
-        active: !root.daemonMode
-
-        sourceComponent: IpcHandler {
-            target: "discord"
-
-            function toggleMute(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", mute: !root.isMuted})
-                return root.isMuted ? "UNMUTED" : "MUTED"
-            }
-
-            function toggleDeafen(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", deaf: !root.isDeafened})
-                return root.isDeafened ? "UNDEAFENED" : "DEAFENED"
-            }
-
-            function muteOn(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", mute: true})
-                return "MUTE_ON"
-            }
-
-            function muteOff(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", mute: false})
-                return "MUTE_OFF"
-            }
-
-            function deafenOn(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", deaf: true})
-                return "DEAFEN_ON"
-            }
-
-            function deafenOff(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", deaf: false})
-                return "DEAFEN_OFF"
-            }
-
-            function status(): string {
-                if (!root.authenticated) return "NOT_AUTHENTICATED"
-                if (!root.inVoice) return "NOT_IN_VOICE"
-                return JSON.stringify({
-                    channel: root.currentChannel ? root.currentChannel.name : "",
-                    users: root.voiceUsers.length,
-                    muted: root.isMuted,
-                    deafened: root.isDeafened
-                })
-            }
-        }
-    }
-
-    // =====================================================================
-    // Bar pills
+    // Bar pills (the daemon surface registers the "discord" IpcHandler)
     // =====================================================================
 
     horizontalBarPill: Component {
