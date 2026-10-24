@@ -30,6 +30,15 @@ PluginComponent {
     readonly property bool isMuted: voiceSettings.mute || false
     readonly property bool isDeafened: voiceSettings.deaf || false
 
+    // Avatars shown in the bar, capped at maxBarAvatars.
+    readonly property var barUsers: inVoice
+        ? (voiceUsers.length > maxBarAvatars
+            ? voiceUsers.slice(0, maxBarAvatars)
+            : voiceUsers)
+        : []
+
+    // Cap on the popout participant list height (20 rows or half the
+    // screen, whichever is smaller).
     readonly property int userListMaxHeight: {
         const rowHeight = 44 + Theme.spacingS
         const byRows = 20 * rowHeight
@@ -48,6 +57,10 @@ PluginComponent {
     function avatarUrl(userId, avatarHash) {
         if (!avatarHash) return ""
         return "https://cdn.discordapp.com/avatars/" + userId + "/" + avatarHash + ".png?size=64"
+    }
+
+    function initialOf(name) {
+        return name ? name.charAt(0).toUpperCase() : "?"
     }
 
     // Never log OAuth tokens: on systemd setups console output lands in
@@ -180,6 +193,66 @@ PluginComponent {
     // Bar pills (the daemon surface registers the "discord" IpcHandler)
     // =====================================================================
 
+    // One avatar per user, shared by both pill orientations. The item is
+    // square and the largest child, so it defines the pill's cross-axis
+    // size and needs no axis anchoring.
+    barAvatar: Component {
+        Item {
+            width: root.widgetThickness
+            height: root.widgetThickness
+
+            // Speaking / mute ring
+            Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                color: "transparent"
+                border.width: 2
+                border.color: {
+                    const isMuted = modelData.self_mute || modelData.mute
+                    const isDeaf = modelData.self_deaf || modelData.deaf
+                    const isSpeaking = root.speakingUsers[modelData.id] === true
+
+                    if (isDeaf || isMuted) return Theme.error
+                    if (isSpeaking) return Theme.success || "#4CAF50"
+                    return "transparent"
+                }
+
+                Behavior on border.color {
+                    DankColorAnim {
+                        duration: Theme.shorterDuration
+                    }
+                }
+            }
+
+            // Avatar image
+            DankCircularImage {
+                anchors.fill: parent
+                anchors.margins: 2
+                imageSource: root.avatarUrl(modelData.id, modelData.avatar)
+                fallbackText: root.initialOf(modelData.username)
+                fallbackIcon: ""
+            }
+
+            // Mute/deafen badge
+            Rectangle {
+                visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
+                width: Math.max(10, root.widgetThickness * 0.35)
+                height: width
+                radius: width / 2
+                color: Theme.error
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
+
+                DankIcon {
+                    anchors.centerIn: parent
+                    name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
+                    size: parent.width - 2
+                    color: Theme.onError || "white"
+                }
+            }
+        }
+    }
+
     horizontalBarPill: Component {
         Row {
             spacing: -4
@@ -193,70 +266,8 @@ PluginComponent {
             }
 
             Repeater {
-                model: {
-                    if (!root.inVoice) return []
-                    const users = root.voiceUsers
-                    return users.length > root.maxBarAvatars
-                        ? users.slice(0, root.maxBarAvatars)
-                        : users
-                }
-
-                Item {
-                    width: root.widgetThickness
-                    height: root.widgetThickness
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    // Speaking / mute ring
-                    Rectangle {
-                        id: avatarRing
-                        anchors.fill: parent
-                        radius: width / 2
-                        color: "transparent"
-                        border.width: 2
-                        border.color: {
-                            const isMuted = modelData.self_mute || modelData.mute
-                            const isDeaf = modelData.self_deaf || modelData.deaf
-                            const isSpeaking = root.speakingUsers[modelData.id] === true
-
-                            if (isDeaf || isMuted) return Theme.error
-                            if (isSpeaking) return Theme.success || "#4CAF50"
-                            return "transparent"
-                        }
-
-                        Behavior on border.color {
-                            DankColorAnim {
-                                duration: Theme.shorterDuration
-                            }
-                        }
-                    }
-
-                    // Avatar image
-                    DankCircularImage {
-                        anchors.fill: parent
-                        anchors.margins: 2
-                        imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
-                        fallbackIcon: ""
-                    }
-
-                    // Mute/deafen badge
-                    Rectangle {
-                        visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
-                        width: Math.max(10, root.widgetThickness * 0.35)
-                        height: width
-                        radius: width / 2
-                        color: Theme.error
-                        anchors.bottom: parent.bottom
-                        anchors.right: parent.right
-
-                        DankIcon {
-                            anchors.centerIn: parent
-                            name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
-                            size: parent.width - 2
-                            color: Theme.onError || "white"
-                        }
-                    }
-                }
+                model: root.barUsers
+                delegate: barAvatar
             }
 
             // Overflow count
@@ -264,7 +275,7 @@ PluginComponent {
                 visible: root.inVoice && root.voiceUsers.length > root.maxBarAvatars
                 text: "+" + (root.voiceUsers.length - root.maxBarAvatars)
                 font.pixelSize: Theme.fontSizeSmall
-                color: Theme.widgetTextColor
+                color: Theme.surfaceText
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -283,73 +294,16 @@ PluginComponent {
             }
 
             Repeater {
-                model: {
-                    if (!root.inVoice) return []
-                    const users = root.voiceUsers
-                    return users.length > root.maxBarAvatars
-                        ? users.slice(0, root.maxBarAvatars)
-                        : users
-                }
-
-                Item {
-                    width: root.widgetThickness
-                    height: root.widgetThickness
-                    anchors.horizontalCenter: parent.horizontalCenter
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: width / 2
-                        color: "transparent"
-                        border.width: 2
-                        border.color: {
-                            const isMuted = modelData.self_mute || modelData.mute
-                            const isDeaf = modelData.self_deaf || modelData.deaf
-                            const isSpeaking = root.speakingUsers[modelData.id] === true
-
-                            if (isDeaf || isMuted) return Theme.error
-                            if (isSpeaking) return Theme.success || "#4CAF50"
-                            return "transparent"
-                        }
-
-                        Behavior on border.color {
-                            DankColorAnim {
-                                duration: Theme.shorterDuration
-                            }
-                        }
-                    }
-
-                    DankCircularImage {
-                        anchors.fill: parent
-                        anchors.margins: 2
-                        imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
-                        fallbackIcon: ""
-                    }
-
-                    Rectangle {
-                        visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
-                        width: Math.max(10, root.widgetThickness * 0.35)
-                        height: width
-                        radius: width / 2
-                        color: Theme.error
-                        anchors.bottom: parent.bottom
-                        anchors.right: parent.right
-
-                        DankIcon {
-                            anchors.centerIn: parent
-                            name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
-                            size: parent.width - 2
-                            color: Theme.onError || "white"
-                        }
-                    }
-                }
+                model: root.barUsers
+                delegate: barAvatar
             }
 
+            // Overflow count
             StyledText {
                 visible: root.inVoice && root.voiceUsers.length > root.maxBarAvatars
                 text: "+" + (root.voiceUsers.length - root.maxBarAvatars)
                 font.pixelSize: Theme.fontSizeSmall
-                color: Theme.widgetTextColor
+                color: Theme.surfaceText
                 anchors.horizontalCenter: parent.horizontalCenter
             }
         }
@@ -429,12 +383,12 @@ PluginComponent {
                             DankIcon {
                                 name: "login"
                                 size: Theme.fontSizeMedium
-                                color: Theme.onPrimary || "white"
+                                color: Theme.onPrimary
                                 anchors.verticalCenter: parent.verticalCenter
                             }
                             StyledText {
                                 text: "Authorize Discord"
-                                color: Theme.onPrimary || "white"
+                                color: Theme.onPrimary
                                 font.pixelSize: Theme.fontSizeMedium
                                 font.weight: Font.Medium
                                 anchors.verticalCenter: parent.verticalCenter
@@ -489,7 +443,7 @@ PluginComponent {
                                         height: 32
                                         anchors.verticalCenter: parent.verticalCenter
                                         imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
+                                        fallbackText: root.initialOf(modelData.username)
                                         fallbackIcon: ""
                                         border.width: root.speakingUsers[modelData.id] === true ? 2 : 0
                                         border.color: Theme.success || "#4CAF50"
@@ -533,65 +487,45 @@ PluginComponent {
                         spacing: Theme.spacingS
                         topPadding: Theme.spacingS
 
-                        Rectangle {
-                            width: (parent.width - Theme.spacingS) / 2
-                            height: 40
-                            radius: Theme.cornerRadius
-                            color: root.isMuted ? Theme.error : Theme.surfaceContainerHigh
+                        Repeater {
+                            model: [
+                                {active: root.isMuted,     iconOn: "mic_off",     iconOff: "mic",     labelOn: "Unmute",   labelOff: "Mute",   key: "mute"},
+                                {active: root.isDeafened,  iconOn: "headset_off", iconOff: "headset", labelOn: "Undeafen", labelOff: "Deafen", key: "deaf"}
+                            ]
 
-                            Row {
-                                anchors.centerIn: parent
-                                spacing: Theme.spacingXS
+                            Rectangle {
+                                width: (parent.width - Theme.spacingS) / 2
+                                height: 40
+                                radius: Theme.cornerRadius
+                                color: modelData.active ? Theme.error : Theme.surfaceContainerHigh
 
-                                DankIcon {
-                                    name: root.isMuted ? "mic_off" : "mic"
-                                    size: 18
-                                    color: root.isMuted ? (Theme.onError || "white") : Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
+                                Row {
+                                    anchors.centerIn: parent
+                                    spacing: Theme.spacingXS
+
+                                    DankIcon {
+                                        name: modelData.active ? modelData.iconOn : modelData.iconOff
+                                        size: 18
+                                        color: modelData.active ? (Theme.onError || "white") : Theme.surfaceText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    StyledText {
+                                        text: modelData.active ? modelData.labelOn : modelData.labelOff
+                                        color: modelData.active ? (Theme.onError || "white") : Theme.surfaceText
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
                                 }
-                                StyledText {
-                                    text: root.isMuted ? "Unmute" : "Mute"
-                                    color: root.isMuted ? (Theme.onError || "white") : Theme.surfaceText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    anchors.verticalCenter: parent.verticalCenter
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const cmd = {cmd: "set_voice_settings"}
+                                        cmd[modelData.key] = !modelData.active
+                                        root.sendBridgeCommand(cmd)
+                                    }
                                 }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.sendBridgeCommand({cmd: "set_voice_settings", mute: !root.isMuted})
-                            }
-                        }
-
-                        Rectangle {
-                            width: (parent.width - Theme.spacingS) / 2
-                            height: 40
-                            radius: Theme.cornerRadius
-                            color: root.isDeafened ? Theme.error : Theme.surfaceContainerHigh
-
-                            Row {
-                                anchors.centerIn: parent
-                                spacing: Theme.spacingXS
-
-                                DankIcon {
-                                    name: root.isDeafened ? "headset_off" : "headset"
-                                    size: 18
-                                    color: root.isDeafened ? (Theme.onError || "white") : Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                                StyledText {
-                                    text: root.isDeafened ? "Undeafen" : "Deafen"
-                                    color: root.isDeafened ? (Theme.onError || "white") : Theme.surfaceText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.sendBridgeCommand({cmd: "set_voice_settings", deaf: !root.isDeafened})
                             }
                         }
                     }
