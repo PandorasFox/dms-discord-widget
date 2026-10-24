@@ -35,7 +35,7 @@ PluginSettings {
 
     StyledText {
         width: parent.width
-        text: "Keybind integration: use 'dms ipc call discord toggleMute' and 'dms ipc call discord toggleDeafen' in your compositor keybinds. For push-to-talk: muteOn / muteOff."
+        text: "Keybind integration via 'dms ipc call discord <command>' — see the README for the full command list."
         font.pixelSize: Theme.fontSizeSmall
         color: Theme.surfaceVariantText
         wrapMode: Text.WordWrap
