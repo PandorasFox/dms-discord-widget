@@ -35,15 +35,24 @@ DEFAULT_CLIENT_ID = "207646673902501888"
 OAUTH_SCOPES = ["rpc", "rpc.voice.read", "rpc.voice.write"]
 TOKEN_EXCHANGE_URL = "https://streamkit.discord.com/overlay/token"
 
-# How often the background loop retries reaching Discord while unauthenticated.
-RECONNECT_INTERVAL = 5.0
-
 # Discord IPC opcodes.
 OP_HANDSHAKE = 0
 OP_FRAME = 1
 OP_CLOSE = 2
 OP_PING = 3
 OP_PONG = 4
+
+# Default voice settings, used for state resets.
+DEFAULT_VOICE_SETTINGS = {"mute": False, "deaf": False}
+
+# Voice events subscribed per channel.
+CHANNEL_EVENTS = (
+    "VOICE_STATE_CREATE",
+    "VOICE_STATE_UPDATE",
+    "VOICE_STATE_DELETE",
+    "SPEAKING_START",
+    "SPEAKING_STOP",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +107,7 @@ class DiscordIPC:
                 self.reader, self.writer = r, w
                 log.info("Connected to Discord IPC at %s", path)
                 return True
-            except (OSError, ConnectionRefusedError):
+            except OSError:
                 continue
         return False
 
@@ -150,45 +159,17 @@ class DiscordIPC:
             raise ConnectionError(f"Expected READY, got: {data}")
         return data
 
-    async def authorize(self, client_id: str, scopes: list[str]) -> str:
-        """AUTHORIZE -> returns OAuth code.  Discord shows consent UI."""
+    async def send_cmd(
+        self, cmd: str, args: dict[str, Any] | None = None,
+        evt: str | None = None,
+    ) -> str:
+        """Send an OP_FRAME command.  Returns the nonce for response matching."""
         nonce = self._next_nonce()
-        await self.send_frame(OP_FRAME, {
-            "cmd": "AUTHORIZE",
-            "args": {
-                "client_id": client_id,
-                "scopes": scopes,
-                "prompt": "none",
-            },
-            "nonce": nonce,
-        })
-        return nonce
-
-    async def authenticate(self, access_token: str) -> str:
-        """AUTHENTICATE with an access token.  Returns nonce."""
-        nonce = self._next_nonce()
-        await self.send_frame(OP_FRAME, {
-            "cmd": "AUTHENTICATE",
-            "args": {"access_token": access_token},
-            "nonce": nonce,
-        })
-        return nonce
-
-    async def subscribe(self, evt: str, args: dict[str, Any] | None = None) -> str:
-        """SUBSCRIBE to a Discord event.  Returns nonce."""
-        nonce = self._next_nonce()
-        payload: dict[str, Any] = {"cmd": "SUBSCRIBE", "evt": evt, "nonce": nonce}
-        if args:
+        payload: dict[str, Any] = {"cmd": cmd, "nonce": nonce}
+        if args is not None:
             payload["args"] = args
-        await self.send_frame(OP_FRAME, payload)
-        return nonce
-
-    async def unsubscribe(self, evt: str, args: dict[str, Any] | None = None) -> str:
-        """UNSUBSCRIBE from a Discord event.  Returns nonce."""
-        nonce = self._next_nonce()
-        payload: dict[str, Any] = {"cmd": "UNSUBSCRIBE", "evt": evt, "nonce": nonce}
-        if args:
-            payload["args"] = args
+        if evt is not None:
+            payload["evt"] = evt
         await self.send_frame(OP_FRAME, payload)
         return nonce
 
@@ -216,7 +197,7 @@ class TokenManager:
                 data = json.load(f)
                 self.access_token = data.get("access_token")
                 return self.access_token
-        except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        except (FileNotFoundError, json.JSONDecodeError):
             return None
 
     def save(self, token: str) -> None:
@@ -290,7 +271,7 @@ class BridgeServer:
     ) -> None:
         self._clients.add(writer)
         log.info("QML client connected (total: %d)", len(self._clients))
-        await self._send_one(writer, {"type": "ready"})
+        await self.send_to(writer, {"type": "ready"})
         if self._on_client:
             await self._on_client(writer)
 
@@ -316,15 +297,14 @@ class BridgeServer:
                 pass
             log.info("QML client disconnected (total: %d)", len(self._clients))
 
+    @staticmethod
+    def _encode(msg: dict[str, Any]) -> bytes:
+        return (json.dumps(msg, separators=(",", ":")) + "\n").encode("utf-8")
+
     async def send_to(self, writer: asyncio.StreamWriter, msg: dict[str, Any]) -> None:
         """Send a JSON-line message to a single client."""
-        await self._send_one(writer, msg)
-
-    async def _send_one(self, writer: asyncio.StreamWriter, msg: dict[str, Any]) -> None:
-        """Send a JSON-line message to a single client."""
         try:
-            data = json.dumps(msg, separators=(",", ":")) + "\n"
-            writer.write(data.encode("utf-8"))
+            writer.write(self._encode(msg))
             await writer.drain()
         except (ConnectionResetError, BrokenPipeError, ConnectionAbortedError):
             self._clients.discard(writer)
@@ -332,8 +312,7 @@ class BridgeServer:
     async def send(self, msg: dict[str, Any]) -> None:
         """Broadcast a JSON-line message to all connected clients."""
         dead: list[asyncio.StreamWriter] = []
-        data = json.dumps(msg, separators=(",", ":")) + "\n"
-        encoded = data.encode("utf-8")
+        encoded = self._encode(msg)
         for writer in list(self._clients):
             if writer.is_closing():
                 dead.append(writer)
@@ -345,10 +324,6 @@ class BridgeServer:
                 dead.append(writer)
         for w in dead:
             self._clients.discard(w)
-
-    @property
-    def has_client(self) -> bool:
-        return len(self._clients) > 0
 
     async def stop(self) -> None:
         for writer in list(self._clients):
@@ -380,14 +355,14 @@ class DiscordBridge:
         self.server = BridgeServer(socket_path)
         self.authenticated = False
         self._discord_connected: bool = False
-        self.current_user: dict[str, Any] = {}
         self.current_channel_id: str | None = None
         self.current_channel: dict[str, Any] | None = None
         self.voice_users: dict[str, dict[str, Any]] = {}
-        self.voice_settings: dict[str, Any] = {"mute": False, "deaf": False}
+        self.voice_settings: dict[str, Any] = dict(DEFAULT_VOICE_SETTINGS)
         self._pending: dict[str, str] = {}  # nonce -> command name
         self._reauth_attempted = False
         self._shutdown = False
+        self._shutdown_event = asyncio.Event()
         self._discord_task: asyncio.Task[None] | None = None
 
     # -- main entry --
@@ -399,54 +374,16 @@ class DiscordBridge:
 
         await self.server.start(self._handle_qml_command, self._on_client_connected)
         log.info("Bridge running, waiting for QML client...")
-
-        reconnect_task = asyncio.create_task(self._reconnect_loop())
-
-        # Keep running until shutdown.
-        while not self._shutdown:
-            await asyncio.sleep(1)
-
-        reconnect_task.cancel()
+        await self._shutdown_event.wait()
 
     async def shutdown(self) -> None:
+        if self._shutdown_event.is_set():
+            return
         log.info("Shutting down...")
         self._shutdown = True
+        self._shutdown_event.set()
         self.discord.close()
         await self.server.stop()
-
-    async def _reconnect_loop(self) -> None:
-        """Keep trying to reach Discord in the background.
-
-        The widget/daemon commonly starts before Discord is running (e.g. at
-        login), or Discord gets restarted underneath us. Without this, the
-        first connect attempt fails and the user is left having to click
-        "Authorize" once Discord finally appears. Instead, whenever a client
-        is attached, we poll to reach Discord: if a cached token exists we
-        auto-authenticate; otherwise we stay connected and wait for the user
-        to authorize (fresh authorization needs Discord's consent UI, which
-        must not be triggered unprompted).
-
-        `_do_connect_flow(quiet=True)` is idempotent, so calling it every
-        interval is safe.
-        """
-        while not self._shutdown:
-            await asyncio.sleep(RECONNECT_INTERVAL)
-            if self._shutdown or not self.server.has_client:
-                continue
-            if self.discord.connected and self.authenticated:
-                continue
-            # Auth already in flight; let it resolve before retrying.
-            pending = self._pending.values()
-            if "AUTHENTICATE" in pending or "AUTHORIZE" in pending:
-                continue
-            try:
-                await self._do_connect_flow(quiet=True)
-            except Exception as e:
-                # Never downgrade this to debug: a silently swallowed
-                # exception here disables automatic re-authentication
-                # entirely, and the only symptom is the user having to click
-                # "Authorize" after every boot.
-                log.warning("Background reconnect attempt failed: %r", e)
 
     async def _on_client_connected(self, writer: asyncio.StreamWriter) -> None:
         """Replay current state to a client that connected after startup.
@@ -461,11 +398,7 @@ class DiscordBridge:
         })
         if not self.authenticated:
             return
-        await self.server.send_to(writer, {
-            "type": "auth_complete",
-            "user": self.current_user,
-            "access_token": self.tokens.access_token or "",
-        })
+        await self.server.send_to(writer, {"type": "auth_complete"})
         if self.current_channel:
             await self.server.send_to(writer, {
                 "type": "voice_channel",
@@ -543,11 +476,10 @@ class DiscordBridge:
             self.discord.close()
             await self._set_discord_connected(False)
             self.authenticated = False
-            self.current_user = {}
             self.current_channel_id = None
             self.current_channel = None
             self.voice_users.clear()
-            self.voice_settings = {"mute": False, "deaf": False}
+            self.voice_settings = dict(DEFAULT_VOICE_SETTINGS)
             await self.server.send({"type": "disconnected", "reason": "Discord connection lost"})
             log.info("Discord disconnected")
 
@@ -577,8 +509,10 @@ class DiscordBridge:
                 if not self._reauth_attempted and self.discord.connected:
                     self._reauth_attempted = True
                     log.info("Attempting silent re-authorization")
-                    reauth_nonce = await self.discord.authorize(
-                        self.client_id, OAUTH_SCOPES
+                    reauth_nonce = await self.discord.send_cmd(
+                        "AUTHORIZE",
+                        {"client_id": self.client_id, "scopes": OAUTH_SCOPES,
+                         "prompt": "none"},
                     )
                     self._pending[reauth_nonce] = "AUTHORIZE"
                     return
@@ -625,7 +559,9 @@ class DiscordBridge:
                 )
                 self.tokens.save(token)
                 # Now authenticate with the token.
-                nonce = await self.discord.authenticate(token)
+                nonce = await self.discord.send_cmd(
+                    "AUTHENTICATE", {"access_token": token}
+                )
                 self._pending[nonce] = "AUTHENTICATE"
             except Exception as e:
                 log.error("Token exchange failed: %s", e)
@@ -635,17 +571,7 @@ class DiscordBridge:
             user = response_data.get("user", {})
             self.authenticated = True
             self._reauth_attempted = False
-            self.current_user = {
-                "id": user.get("id", ""),
-                "username": user.get("username", ""),
-                "avatar": user.get("avatar", ""),
-            }
-            token = self.tokens.access_token or ""
-            await self.server.send({
-                "type": "auth_complete",
-                "user": self.current_user,
-                "access_token": token,
-            })
+            await self.server.send({"type": "auth_complete"})
             log.info("Authenticated as %s", user.get("username", "?"))
             # Subscribe to server-level voice events.
             await self._subscribe_server_events()
@@ -666,60 +592,56 @@ class DiscordBridge:
                 "mute": response_data.get("mute", False),
                 "deaf": response_data.get("deaf", False),
             }
-            await self.server.send({
-                "type": "voice_settings",
-                **self.voice_settings,
-            })
+            await self._send_voice_settings()
 
     async def _send_discord_command(
         self, cmd: str, args: dict[str, Any] | None = None
     ) -> None:
         """Send a command to Discord, tracking the nonce for response matching."""
-        nonce_str = self.discord._next_nonce()
-        payload: dict[str, Any] = {"cmd": cmd, "nonce": str(nonce_str)}
-        if args:
-            payload["args"] = args
-        self._pending[str(nonce_str)] = cmd
-        await self.discord.send_frame(OP_FRAME, payload)
+        nonce = await self.discord.send_cmd(cmd, args)
+        self._pending[nonce] = cmd
 
     # -- event subscriptions --
 
     async def _subscribe_server_events(self) -> None:
         """Subscribe to server-level events after authentication."""
-        nonce = await self.discord.subscribe("VOICE_CHANNEL_SELECT")
-        self._pending[nonce] = "SUB_VOICE_CHANNEL_SELECT"
-
-        nonce = await self.discord.subscribe("VOICE_SETTINGS_UPDATE")
-        self._pending[nonce] = "SUB_VOICE_SETTINGS_UPDATE"
+        for evt in ("VOICE_CHANNEL_SELECT", "VOICE_SETTINGS_UPDATE"):
+            await self.discord.send_cmd("SUBSCRIBE", None, evt)
 
     async def _subscribe_channel_events(self, channel_id: str) -> None:
         """Subscribe to voice events for a specific channel."""
-        for evt in (
-            "VOICE_STATE_CREATE",
-            "VOICE_STATE_UPDATE",
-            "VOICE_STATE_DELETE",
-            "SPEAKING_START",
-            "SPEAKING_STOP",
-        ):
-            nonce = await self.discord.subscribe(evt, {"channel_id": channel_id})
-            self._pending[nonce] = f"SUB_{evt}"
+        for evt in CHANNEL_EVENTS:
+            await self.discord.send_cmd("SUBSCRIBE", {"channel_id": channel_id}, evt)
 
     async def _unsubscribe_channel_events(self, channel_id: str) -> None:
         """Unsubscribe from voice events for a specific channel."""
-        for evt in (
-            "VOICE_STATE_CREATE",
-            "VOICE_STATE_UPDATE",
-            "VOICE_STATE_DELETE",
-            "SPEAKING_START",
-            "SPEAKING_STOP",
-        ):
+        for evt in CHANNEL_EVENTS:
             try:
-                nonce = await self.discord.unsubscribe(evt, {"channel_id": channel_id})
-                self._pending[nonce] = f"UNSUB_{evt}"
+                await self.discord.send_cmd(
+                    "UNSUBSCRIBE", {"channel_id": channel_id}, evt
+                )
             except Exception:
                 pass
 
     # -- voice state management --
+
+    @staticmethod
+    def _user_entry(
+        user: dict[str, Any], voice: dict[str, Any], nick: str
+    ) -> dict[str, Any]:
+        """Build a voice-user entry for state broadcasts to QML."""
+        username = user.get("username", "")
+        return {
+            "id": user.get("id", ""),
+            "username": username,
+            "avatar": user.get("avatar", ""),
+            "nick": nick or username,
+            "mute": voice.get("mute", False),
+            "self_mute": voice.get("self_mute", False),
+            "deaf": voice.get("deaf", False),
+            "self_deaf": voice.get("self_deaf", False),
+            "speaking": False,
+        }
 
     async def _on_voice_channel_join(
         self, channel_id: str, channel_name: str, guild_id: str,
@@ -747,20 +669,11 @@ class DiscordBridge:
         if channel_data and "voice_states" in channel_data:
             for vs in channel_data["voice_states"]:
                 user = vs.get("user", {})
-                voice = vs.get("voice_state", {})
                 uid = user.get("id", "")
                 if uid:
-                    self.voice_users[uid] = {
-                        "id": uid,
-                        "username": user.get("username", ""),
-                        "avatar": user.get("avatar", ""),
-                        "nick": vs.get("nick", "") or user.get("username", ""),
-                        "mute": voice.get("mute", False),
-                        "self_mute": voice.get("self_mute", False),
-                        "deaf": voice.get("deaf", False),
-                        "self_deaf": voice.get("self_deaf", False),
-                        "speaking": False,
-                    }
+                    self.voice_users[uid] = self._user_entry(
+                        user, vs.get("voice_state", {}), vs.get("nick", "")
+                    )
             await self._send_voice_state()
 
         # Subscribe to this channel's events.
@@ -783,6 +696,13 @@ class DiscordBridge:
         users = list(self.voice_users.values())
         await self.server.send({"type": "voice_state", "users": users})
 
+    async def _send_voice_settings(self) -> None:
+        """Broadcast current voice settings to QML."""
+        await self.server.send({
+            "type": "voice_settings",
+            **self.voice_settings,
+        })
+
     # -- dispatch handler --
 
     async def _handle_dispatch(self, evt: str, data: dict[str, Any]) -> None:
@@ -801,20 +721,11 @@ class DiscordBridge:
 
         elif evt == "VOICE_STATE_CREATE":
             user = data.get("user", {})
-            voice = data.get("voice_state", {})
             uid = user.get("id", "")
             if uid:
-                self.voice_users[uid] = {
-                    "id": uid,
-                    "username": user.get("username", ""),
-                    "avatar": user.get("avatar", ""),
-                    "nick": data.get("nick", "") or user.get("username", ""),
-                    "mute": voice.get("mute", False),
-                    "self_mute": voice.get("self_mute", False),
-                    "deaf": voice.get("deaf", False),
-                    "self_deaf": voice.get("self_deaf", False),
-                    "speaking": False,
-                }
+                self.voice_users[uid] = self._user_entry(
+                    user, data.get("voice_state", {}), data.get("nick", "")
+                )
                 await self._send_voice_state()
 
         elif evt == "VOICE_STATE_UPDATE":
@@ -856,10 +767,7 @@ class DiscordBridge:
                 "mute": data.get("mute", False),
                 "deaf": data.get("deaf", False),
             }
-            await self.server.send({
-                "type": "voice_settings",
-                **self.voice_settings,
-            })
+            await self._send_voice_settings()
 
     # -- QML command handler --
 
@@ -868,7 +776,14 @@ class DiscordBridge:
         cmd = msg.get("cmd", "")
 
         if cmd == "connect":
-            asyncio.ensure_future(self._do_connect_flow())
+            # Fire-and-forget: every client sends `connect` on attach, and the
+            # idempotency guard in _do_connect_flow makes repeats safe, so
+            # this must not block the socket read loop. `quiet` (sent by the
+            # daemon's connect-retry timer) suppresses error broadcasts for
+            # expected failures such as Discord not being up yet.
+            asyncio.ensure_future(
+                self._guarded_connect(quiet=msg.get("quiet", False))
+            )
 
         elif cmd == "authorize":
             if not self.discord.connected:
@@ -881,19 +796,12 @@ class DiscordBridge:
             # A token minted from explicit user consent that still fails to
             # authenticate is a real error; don't silently retry it.
             self._reauth_attempted = True
-            nonce = await self.discord.authorize(self.client_id, OAUTH_SCOPES)
+            nonce = await self.discord.send_cmd(
+                "AUTHORIZE",
+                {"client_id": self.client_id, "scopes": OAUTH_SCOPES,
+                 "prompt": "none"},
+            )
             self._pending[nonce] = "AUTHORIZE"
-
-        elif cmd == "authenticate":
-            token = self.tokens.load() or ""
-            if not token:
-                await self.server.send({"type": "auth_required"})
-                return
-            if not self.discord.connected:
-                if not await self._connect_discord():
-                    return
-            nonce = await self.discord.authenticate(token)
-            self._pending[nonce] = "AUTHENTICATE"
 
         elif cmd == "set_voice_settings":
             if not self.authenticated:
@@ -906,22 +814,26 @@ class DiscordBridge:
             if args:
                 await self._send_discord_command("SET_VOICE_SETTINGS", args)
 
-        elif cmd == "get_voice_settings":
-            if self.authenticated:
-                await self._send_discord_command("GET_VOICE_SETTINGS")
-
-        elif cmd == "shutdown":
-            await self.shutdown()
+    async def _guarded_connect(self, quiet: bool) -> None:
+        try:
+            await self._do_connect_flow(quiet=quiet)
+        except Exception as e:
+            # Never downgrade this to debug: a silently swallowed exception
+            # here disables automatic re-authentication entirely, and the
+            # only symptom is the user having to click "Authorize" after
+            # every boot.
+            log.warning("Connect attempt failed: %r", e)
 
     async def _do_connect_flow(self, quiet: bool = False) -> None:
         """Full connection flow: connect, then try cached token or request auth.
 
         Idempotent: every client (daemon and each bar widget) sends `connect`
-        when it attaches, so repeat calls while already connected or mid-auth
-        must not tear down or duplicate anything.
+        when it attaches, and the daemon's connect-retry timer keeps sending
+        it while unauthenticated, so repeat calls while already connected or
+        mid-auth must not tear down or duplicate anything.
 
-        `quiet` is used by the background reconnect loop: Discord-not-running
-        failures stay silent, and a missing token doesn't re-broadcast
+        `quiet` is used by the daemon's connect-retry timer: Discord-not-
+        running failures stay silent, and a missing token doesn't re-broadcast
         `auth_required` (which the widget already shows).
         """
         if self.discord.connected:
@@ -939,7 +851,9 @@ class DiscordBridge:
         # Try cached token.
         token = self.tokens.load()
         if token:
-            nonce = await self.discord.authenticate(token)
+            nonce = await self.discord.send_cmd(
+                "AUTHENTICATE", {"access_token": token}
+            )
             self._pending[nonce] = "AUTHENTICATE"
         elif not quiet:
             await self.server.send({"type": "auth_required"})
