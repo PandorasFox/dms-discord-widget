@@ -11,34 +11,27 @@ PluginComponent {
 
     layerNamespacePlugin: "discord-voice"
 
-    // --- Bridge state ---
     property bool authenticated: false
     property string authError: ""
     property bool discordConnected: false
 
-    // --- Voice state ---
     property var currentChannel: null
     property var voiceUsers: []
     property var voiceSettings: ({mute: false, deaf: false})
     property var speakingUsers: ({})
 
-    // --- Settings ---
     readonly property int maxBarAvatars: parseInt(pluginData.maxBarAvatars) || 5
 
-    // --- Computed ---
     readonly property bool inVoice: currentChannel !== null && currentChannel !== undefined
     readonly property bool isMuted: voiceSettings.mute || false
     readonly property bool isDeafened: voiceSettings.deaf || false
 
-    // Avatars shown in the bar, capped at maxBarAvatars.
     readonly property var barUsers: inVoice
         ? (voiceUsers.length > maxBarAvatars
             ? voiceUsers.slice(0, maxBarAvatars)
             : voiceUsers)
         : []
 
-    // Cap on the popout participant list height (20 rows or half the
-    // screen, whichever is smaller).
     readonly property int userListMaxHeight: {
         const rowHeight = 44 + Theme.spacingS
         const byRows = 20 * rowHeight
@@ -47,13 +40,11 @@ PluginComponent {
         return Math.min(byRows, byScreen)
     }
 
-    // --- Socket path ---
     readonly property string bridgeSocketPath: {
         const runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
         return runtime + "/dms-discord-voice.sock"
     }
 
-    // --- Helpers (accessible from popout via root.xxx) ---
     function avatarUrl(userId, avatarHash) {
         if (!avatarHash) return ""
         return "https://cdn.discordapp.com/avatars/" + userId + "/" + avatarHash + ".png?size=64"
@@ -63,13 +54,6 @@ PluginComponent {
         return name ? name.charAt(0).toUpperCase() : "?"
     }
 
-    // Never log OAuth tokens: on systemd setups console output lands in
-    // the journal, where any journal reader could lift a live token.
-    function sendBridgeCommand(cmd) {
-        bridgeSocket.send(cmd)
-    }
-
-    // --- Visibility ---
     // Show the pill when in a voice call (participants), or when not
     // authenticated (login placeholder so the popout is reachable).
     // Hide only in the steady state: authenticated + idle.
@@ -85,9 +69,9 @@ PluginComponent {
     onInVoiceChanged: updateVisibility()
     onAuthenticatedChanged: updateVisibility()
 
-    // =====================================================================
     // DankSocket connection to bridge (the daemon surface owns the process)
-    // =====================================================================
+    // Never log OAuth tokens: on systemd setups console output lands in
+    // the journal, where any journal reader could lift a live token.
 
     DankSocket {
         id: bridgeSocket
@@ -114,15 +98,8 @@ PluginComponent {
         id: socketConnectTimer
         interval: 800
         running: true
-        onTriggered: {
-            console.warn("DiscordVoice: connecting socket to bridge")
-            bridgeSocket.connected = true
-        }
+        onTriggered: bridgeSocket.connected = true
     }
-
-    // =====================================================================
-    // Message handler
-    // =====================================================================
 
     function handleBridgeMessage(msg) {
         switch (msg.type) {
@@ -138,7 +115,6 @@ PluginComponent {
         case "auth_complete":
             authenticated = true
             authError = ""
-            discordConnected = true
             break
 
         case "discord_status":
@@ -189,19 +165,16 @@ PluginComponent {
         }
     }
 
-    // =====================================================================
     // Bar pills (the daemon surface registers the "discord" IpcHandler)
-    // =====================================================================
 
     // One avatar per user, shared by both pill orientations. The item is
     // square and the largest child, so it defines the pill's cross-axis
     // size and needs no axis anchoring.
-    barAvatar: Component {
+    property Component barAvatar: Component {
         Item {
             width: root.widgetThickness
             height: root.widgetThickness
 
-            // Speaking / mute ring
             Rectangle {
                 anchors.fill: parent
                 radius: width / 2
@@ -224,7 +197,6 @@ PluginComponent {
                 }
             }
 
-            // Avatar image
             DankCircularImage {
                 anchors.fill: parent
                 anchors.margins: 2
@@ -233,7 +205,6 @@ PluginComponent {
                 fallbackIcon: ""
             }
 
-            // Mute/deafen badge
             Rectangle {
                 visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
                 width: Math.max(10, root.widgetThickness * 0.35)
@@ -270,7 +241,6 @@ PluginComponent {
                 delegate: barAvatar
             }
 
-            // Overflow count
             StyledText {
                 visible: root.inVoice && root.voiceUsers.length > root.maxBarAvatars
                 text: "+" + (root.voiceUsers.length - root.maxBarAvatars)
@@ -298,7 +268,6 @@ PluginComponent {
                 delegate: barAvatar
             }
 
-            // Overflow count
             StyledText {
                 visible: root.inVoice && root.voiceUsers.length > root.maxBarAvatars
                 text: "+" + (root.voiceUsers.length - root.maxBarAvatars)
@@ -308,10 +277,6 @@ PluginComponent {
             }
         }
     }
-
-    // =====================================================================
-    // Popout
-    // =====================================================================
 
     popoutWidth: 320
     popoutHeight: 400
@@ -327,7 +292,6 @@ PluginComponent {
                 width: parent.width
                 spacing: Theme.spacingM
 
-                // --- Not authenticated ---
                 Column {
                     visible: !root.authenticated
                     width: parent.width
@@ -398,21 +362,16 @@ PluginComponent {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                console.warn("DiscordVoice: authorize button clicked")
-                                root.sendBridgeCommand({cmd: "authorize"})
-                            }
+                            onClicked: bridgeSocket.send({cmd: "authorize"})
                         }
                     }
                 }
 
-                // --- Authenticated, in voice ---
                 Column {
                     visible: root.authenticated && root.inVoice
                     width: parent.width
                     spacing: Theme.spacingS
 
-                    // Participant list
                     Item {
                         id: userListContainer
                         width: parent.width
@@ -481,7 +440,6 @@ PluginComponent {
                         }
                     }
 
-                    // Mute / deafen controls
                     Row {
                         width: parent.width
                         spacing: Theme.spacingS
@@ -523,7 +481,7 @@ PluginComponent {
                                     onClicked: {
                                         const cmd = {cmd: "set_voice_settings"}
                                         cmd[modelData.key] = !modelData.active
-                                        root.sendBridgeCommand(cmd)
+                                        bridgeSocket.send(cmd)
                                     }
                                 }
                             }
@@ -531,7 +489,6 @@ PluginComponent {
                     }
                 }
 
-                // --- Authenticated, not in voice ---
                 Column {
                     visible: root.authenticated && !root.inVoice
                     width: parent.width
