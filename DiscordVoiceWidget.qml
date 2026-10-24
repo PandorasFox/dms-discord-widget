@@ -11,37 +11,26 @@ PluginComponent {
 
     layerNamespacePlugin: "discord-voice"
 
-    property var popoutService: null
-
-    // --- Bridge state ---
-    property bool bridgeReady: false
     property bool authenticated: false
     property string authError: ""
     property bool discordConnected: false
 
-    // --- Voice state ---
     property var currentChannel: null
     property var voiceUsers: []
     property var voiceSettings: ({mute: false, deaf: false})
     property var speakingUsers: ({})
 
-    // --- Settings ---
-    readonly property string clientId: "207646673902501888"
     readonly property int maxBarAvatars: parseInt(pluginData.maxBarAvatars) || 5
 
-    // On DMS >= 1.5 the daemon surface owns the bridge process and the IPC
-    // handler (it survives bar reloads on monitor sleep/wake; a per-widget
-    // IpcHandler leaves a stale "discord" target behind when its bar window
-    // is destroyed). On older DMS without composite plugin support this is
-    // false and the widget self-hosts both, as before.
-    readonly property bool daemonMode: !!(pluginService
-        && pluginService.pluginDaemonComponents
-        && pluginService.pluginDaemonComponents["discordVoice"])
-
-    // --- Computed ---
     readonly property bool inVoice: currentChannel !== null && currentChannel !== undefined
     readonly property bool isMuted: voiceSettings.mute || false
     readonly property bool isDeafened: voiceSettings.deaf || false
+
+    readonly property var barUsers: inVoice
+        ? (voiceUsers.length > maxBarAvatars
+            ? voiceUsers.slice(0, maxBarAvatars)
+            : voiceUsers)
+        : []
 
     readonly property int userListMaxHeight: {
         const rowHeight = 44 + Theme.spacingS
@@ -51,35 +40,20 @@ PluginComponent {
         return Math.min(byRows, byScreen)
     }
 
-    // --- Socket path ---
     readonly property string bridgeSocketPath: {
         const runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
         return runtime + "/dms-discord-voice.sock"
     }
 
-    // --- Helpers (accessible from popout via root.xxx) ---
     function avatarUrl(userId, avatarHash) {
         if (!avatarHash) return ""
         return "https://cdn.discordapp.com/avatars/" + userId + "/" + avatarHash + ".png?size=64"
     }
 
-    // Never log OAuth tokens: on systemd setups console output lands in
-    // the journal, where any journal reader could lift a live token.
-    function redactForLog(msg) {
-        if (!msg || typeof msg !== "object") return JSON.stringify(msg)
-        const copy = Object.assign({}, msg)
-        for (const key of ["token", "access_token"]) {
-            if (copy[key]) copy[key] = "<redacted>"
-        }
-        return JSON.stringify(copy)
+    function initialOf(name) {
+        return name ? name.charAt(0).toUpperCase() : "?"
     }
 
-    function sendBridgeCommand(cmd) {
-        console.warn("DiscordVoice: sendBridgeCommand", redactForLog(cmd))
-        bridgeSocket.send(cmd)
-    }
-
-    // --- Visibility ---
     // Show the pill when in a voice call (participants), or when not
     // authenticated (login placeholder so the popout is reachable).
     // Hide only in the steady state: authenticated + idle.
@@ -95,79 +69,13 @@ PluginComponent {
     onInVoiceChanged: updateVisibility()
     onAuthenticatedChanged: updateVisibility()
 
-    // =====================================================================
-    // Bridge process
-    // =====================================================================
-
-    Process {
-        id: bridgeProcess
-        command: ["python3", Qt.resolvedUrl("discord_bridge.py").toString().replace("file://", ""), root.bridgeSocketPath, root.clientId]
-        running: false
-
-        stderr: StdioCollector {
-            onStreamFinished: {
-                if (text && text.trim()) {
-                    console.warn("DiscordVoice bridge:", text.trim())
-                }
-            }
-        }
-
-        onExited: (exitCode) => {
-            // Exit 0 means another bridge instance already owns the socket;
-            // just keep using it as a client.
-            if (exitCode === 0) return
-            console.warn("DiscordVoice bridge exited:", exitCode)
-            root.bridgeReady = false
-            root.authenticated = false
-            root.currentChannel = null
-            root.voiceUsers = []
-            bridgeRestartTimer.start()
-        }
-    }
-
-    // Start bridge after a short delay so the socket path is ready
-    // before DankSocket tries to connect. In daemon mode the daemon
-    // surface owns the process instead.
-    Timer {
-        id: bridgeStartTimer
-        interval: 100
-        running: true
-        onTriggered: {
-            if (!root.daemonMode) {
-                bridgeProcess.running = true
-            }
-        }
-    }
-
-    Timer {
-        id: bridgeRestartTimer
-        interval: 3000
-        onTriggered: bridgeProcess.running = true
-    }
-
-    // Legacy-mode watchdog: if the widget instance that owned the bridge
-    // process was destroyed (bar reload on monitor sleep/wake), surviving
-    // instances bring the bridge back up. Safe against races - extra
-    // bridge processes exit immediately when the socket is already owned.
-    Timer {
-        interval: 5000
-        repeat: true
-        running: !root.daemonMode
-        onTriggered: {
-            if (!bridgeSocket.linkUp && !bridgeProcess.running) {
-                bridgeProcess.running = true
-            }
-        }
-    }
-
-    // =====================================================================
-    // DankSocket connection to bridge
-    // =====================================================================
+    // DankSocket connection to bridge (the daemon surface owns the process)
+    // Never log OAuth tokens: on systemd setups console output lands in
+    // the journal, where any journal reader could lift a live token.
 
     DankSocket {
         id: bridgeSocket
         path: root.bridgeSocketPath
-        // Don't connect until bridge has had time to start.
         connected: false
 
         parser: SplitParser {
@@ -183,28 +91,19 @@ PluginComponent {
         }
     }
 
-    // Connect socket after the bridge (ours or the daemon's) has had time
-    // to create its socket file. DankSocket retries with backoff until the
-    // bridge is up, so a fixed delay is safe in both modes.
+    // Connect socket after the daemon's bridge has had time to create its
+    // socket file. DankSocket retries with backoff until the bridge is up,
+    // so a fixed delay is safe.
     Timer {
         id: socketConnectTimer
         interval: 800
         running: true
-        onTriggered: {
-            console.warn("DiscordVoice: connecting socket to bridge")
-            bridgeSocket.connected = true
-        }
+        onTriggered: bridgeSocket.connected = true
     }
 
-    // =====================================================================
-    // Message handler
-    // =====================================================================
-
     function handleBridgeMessage(msg) {
-        console.warn("DiscordVoice: bridge msg:", redactForLog(msg))
         switch (msg.type) {
         case "ready":
-            bridgeReady = true
             bridgeSocket.send({cmd: "connect"})
             break
 
@@ -216,7 +115,6 @@ PluginComponent {
         case "auth_complete":
             authenticated = true
             authError = ""
-            discordConnected = true
             break
 
         case "discord_status":
@@ -267,65 +165,64 @@ PluginComponent {
         }
     }
 
-    // =====================================================================
-    // IPC Handler (for keybinds: dms ipc call discord ...)
-    // Legacy mode only - in daemon mode the daemon surface registers it,
-    // since a handler tied to a bar widget goes stale when bar windows are
-    // recreated on monitor sleep/wake.
-    // =====================================================================
+    // Bar pills (the daemon surface registers the "discord" IpcHandler)
 
-    Loader {
-        active: !root.daemonMode
+    // One avatar per user, shared by both pill orientations. The item is
+    // square and the largest child, so it defines the pill's cross-axis
+    // size and needs no axis anchoring.
+    property Component barAvatar: Component {
+        Item {
+            width: root.widgetThickness
+            height: root.widgetThickness
 
-        sourceComponent: IpcHandler {
-            target: "discord"
+            Rectangle {
+                anchors.fill: parent
+                radius: width / 2
+                color: "transparent"
+                border.width: 2
+                border.color: {
+                    const isMuted = modelData.self_mute || modelData.mute
+                    const isDeaf = modelData.self_deaf || modelData.deaf
+                    const isSpeaking = root.speakingUsers[modelData.id] === true
 
-            function toggleMute(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", mute: !root.isMuted})
-                return root.isMuted ? "UNMUTED" : "MUTED"
+                    if (isDeaf || isMuted) return Theme.error
+                    if (isSpeaking) return Theme.success || "#4CAF50"
+                    return "transparent"
+                }
+
+                Behavior on border.color {
+                    DankColorAnim {
+                        duration: Theme.shorterDuration
+                    }
+                }
             }
 
-            function toggleDeafen(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", deaf: !root.isDeafened})
-                return root.isDeafened ? "UNDEAFENED" : "DEAFENED"
+            DankCircularImage {
+                anchors.fill: parent
+                anchors.margins: 2
+                imageSource: root.avatarUrl(modelData.id, modelData.avatar)
+                fallbackText: root.initialOf(modelData.username)
+                fallbackIcon: ""
             }
 
-            function muteOn(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", mute: true})
-                return "MUTE_ON"
-            }
+            Rectangle {
+                visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
+                width: Math.max(10, root.widgetThickness * 0.35)
+                height: width
+                radius: width / 2
+                color: Theme.error
+                anchors.bottom: parent.bottom
+                anchors.right: parent.right
 
-            function muteOff(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", mute: false})
-                return "MUTE_OFF"
-            }
-
-            function deafenOn(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", deaf: true})
-                return "DEAFEN_ON"
-            }
-
-            function deafenOff(): string {
-                root.sendBridgeCommand({cmd: "set_voice_settings", deaf: false})
-                return "DEAFEN_OFF"
-            }
-
-            function status(): string {
-                if (!root.authenticated) return "NOT_AUTHENTICATED"
-                if (!root.inVoice) return "NOT_IN_VOICE"
-                return JSON.stringify({
-                    channel: root.currentChannel ? root.currentChannel.name : "",
-                    users: root.voiceUsers.length,
-                    muted: root.isMuted,
-                    deafened: root.isDeafened
-                })
+                DankIcon {
+                    anchors.centerIn: parent
+                    name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
+                    size: parent.width - 2
+                    color: Theme.onError || "white"
+                }
             }
         }
     }
-
-    // =====================================================================
-    // Bar pills
-    // =====================================================================
 
     horizontalBarPill: Component {
         Row {
@@ -340,78 +237,15 @@ PluginComponent {
             }
 
             Repeater {
-                model: {
-                    if (!root.inVoice) return []
-                    const users = root.voiceUsers
-                    return users.length > root.maxBarAvatars
-                        ? users.slice(0, root.maxBarAvatars)
-                        : users
-                }
-
-                Item {
-                    width: root.widgetThickness
-                    height: root.widgetThickness
-                    anchors.verticalCenter: parent.verticalCenter
-
-                    // Speaking / mute ring
-                    Rectangle {
-                        id: avatarRing
-                        anchors.fill: parent
-                        radius: width / 2
-                        color: "transparent"
-                        border.width: 2
-                        border.color: {
-                            const isMuted = modelData.self_mute || modelData.mute
-                            const isDeaf = modelData.self_deaf || modelData.deaf
-                            const isSpeaking = root.speakingUsers[modelData.id] === true
-
-                            if (isDeaf || isMuted) return Theme.error
-                            if (isSpeaking) return Theme.success || "#4CAF50"
-                            return "transparent"
-                        }
-
-                        Behavior on border.color {
-                            DankColorAnim {
-                                duration: Theme.shorterDuration
-                            }
-                        }
-                    }
-
-                    // Avatar image
-                    DankCircularImage {
-                        anchors.fill: parent
-                        anchors.margins: 2
-                        imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
-                        fallbackIcon: ""
-                    }
-
-                    // Mute/deafen badge
-                    Rectangle {
-                        visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
-                        width: Math.max(10, root.widgetThickness * 0.35)
-                        height: width
-                        radius: width / 2
-                        color: Theme.error
-                        anchors.bottom: parent.bottom
-                        anchors.right: parent.right
-
-                        DankIcon {
-                            anchors.centerIn: parent
-                            name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
-                            size: parent.width - 2
-                            color: Theme.onError || "white"
-                        }
-                    }
-                }
+                model: root.barUsers
+                delegate: barAvatar
             }
 
-            // Overflow count
             StyledText {
                 visible: root.inVoice && root.voiceUsers.length > root.maxBarAvatars
                 text: "+" + (root.voiceUsers.length - root.maxBarAvatars)
                 font.pixelSize: Theme.fontSizeSmall
-                color: Theme.widgetTextColor
+                color: Theme.surfaceText
                 anchors.verticalCenter: parent.verticalCenter
             }
         }
@@ -430,81 +264,19 @@ PluginComponent {
             }
 
             Repeater {
-                model: {
-                    if (!root.inVoice) return []
-                    const users = root.voiceUsers
-                    return users.length > root.maxBarAvatars
-                        ? users.slice(0, root.maxBarAvatars)
-                        : users
-                }
-
-                Item {
-                    width: root.widgetThickness
-                    height: root.widgetThickness
-                    anchors.horizontalCenter: parent.horizontalCenter
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: width / 2
-                        color: "transparent"
-                        border.width: 2
-                        border.color: {
-                            const isMuted = modelData.self_mute || modelData.mute
-                            const isDeaf = modelData.self_deaf || modelData.deaf
-                            const isSpeaking = root.speakingUsers[modelData.id] === true
-
-                            if (isDeaf || isMuted) return Theme.error
-                            if (isSpeaking) return Theme.success || "#4CAF50"
-                            return "transparent"
-                        }
-
-                        Behavior on border.color {
-                            DankColorAnim {
-                                duration: Theme.shorterDuration
-                            }
-                        }
-                    }
-
-                    DankCircularImage {
-                        anchors.fill: parent
-                        anchors.margins: 2
-                        imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
-                        fallbackIcon: ""
-                    }
-
-                    Rectangle {
-                        visible: modelData.self_mute || modelData.mute || modelData.self_deaf || modelData.deaf
-                        width: Math.max(10, root.widgetThickness * 0.35)
-                        height: width
-                        radius: width / 2
-                        color: Theme.error
-                        anchors.bottom: parent.bottom
-                        anchors.right: parent.right
-
-                        DankIcon {
-                            anchors.centerIn: parent
-                            name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
-                            size: parent.width - 2
-                            color: Theme.onError || "white"
-                        }
-                    }
-                }
+                model: root.barUsers
+                delegate: barAvatar
             }
 
             StyledText {
                 visible: root.inVoice && root.voiceUsers.length > root.maxBarAvatars
                 text: "+" + (root.voiceUsers.length - root.maxBarAvatars)
                 font.pixelSize: Theme.fontSizeSmall
-                color: Theme.widgetTextColor
+                color: Theme.surfaceText
                 anchors.horizontalCenter: parent.horizontalCenter
             }
         }
     }
-
-    // =====================================================================
-    // Popout
-    // =====================================================================
 
     popoutWidth: 320
     popoutHeight: 400
@@ -520,7 +292,6 @@ PluginComponent {
                 width: parent.width
                 spacing: Theme.spacingM
 
-                // --- Not authenticated ---
                 Column {
                     visible: !root.authenticated
                     width: parent.width
@@ -576,12 +347,12 @@ PluginComponent {
                             DankIcon {
                                 name: "login"
                                 size: Theme.fontSizeMedium
-                                color: Theme.onPrimary || "white"
+                                color: Theme.onPrimary
                                 anchors.verticalCenter: parent.verticalCenter
                             }
                             StyledText {
                                 text: "Authorize Discord"
-                                color: Theme.onPrimary || "white"
+                                color: Theme.onPrimary
                                 font.pixelSize: Theme.fontSizeMedium
                                 font.weight: Font.Medium
                                 anchors.verticalCenter: parent.verticalCenter
@@ -591,21 +362,16 @@ PluginComponent {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                console.warn("DiscordVoice: authorize button clicked")
-                                root.sendBridgeCommand({cmd: "authorize"})
-                            }
+                            onClicked: bridgeSocket.send({cmd: "authorize"})
                         }
                     }
                 }
 
-                // --- Authenticated, in voice ---
                 Column {
                     visible: root.authenticated && root.inVoice
                     width: parent.width
                     spacing: Theme.spacingS
 
-                    // Participant list
                     Item {
                         id: userListContainer
                         width: parent.width
@@ -636,7 +402,7 @@ PluginComponent {
                                         height: 32
                                         anchors.verticalCenter: parent.verticalCenter
                                         imageSource: root.avatarUrl(modelData.id, modelData.avatar)
-                                        fallbackText: modelData.username ? modelData.username.charAt(0).toUpperCase() : "?"
+                                        fallbackText: root.initialOf(modelData.username)
                                         fallbackIcon: ""
                                         border.width: root.speakingUsers[modelData.id] === true ? 2 : 0
                                         border.color: Theme.success || "#4CAF50"
@@ -674,77 +440,55 @@ PluginComponent {
                         }
                     }
 
-                    // Mute / deafen controls
                     Row {
                         width: parent.width
                         spacing: Theme.spacingS
                         topPadding: Theme.spacingS
 
-                        Rectangle {
-                            width: (parent.width - Theme.spacingS) / 2
-                            height: 40
-                            radius: Theme.cornerRadius
-                            color: root.isMuted ? Theme.error : Theme.surfaceContainerHigh
+                        Repeater {
+                            model: [
+                                {active: root.isMuted,     iconOn: "mic_off",     iconOff: "mic",     labelOn: "Unmute",   labelOff: "Mute",   key: "mute"},
+                                {active: root.isDeafened,  iconOn: "headset_off", iconOff: "headset", labelOn: "Undeafen", labelOff: "Deafen", key: "deaf"}
+                            ]
 
-                            Row {
-                                anchors.centerIn: parent
-                                spacing: Theme.spacingXS
+                            Rectangle {
+                                width: (parent.width - Theme.spacingS) / 2
+                                height: 40
+                                radius: Theme.cornerRadius
+                                color: modelData.active ? Theme.error : Theme.surfaceContainerHigh
 
-                                DankIcon {
-                                    name: root.isMuted ? "mic_off" : "mic"
-                                    size: 18
-                                    color: root.isMuted ? (Theme.onError || "white") : Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
+                                Row {
+                                    anchors.centerIn: parent
+                                    spacing: Theme.spacingXS
+
+                                    DankIcon {
+                                        name: modelData.active ? modelData.iconOn : modelData.iconOff
+                                        size: 18
+                                        color: modelData.active ? (Theme.onError || "white") : Theme.surfaceText
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
+                                    StyledText {
+                                        text: modelData.active ? modelData.labelOn : modelData.labelOff
+                                        color: modelData.active ? (Theme.onError || "white") : Theme.surfaceText
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        anchors.verticalCenter: parent.verticalCenter
+                                    }
                                 }
-                                StyledText {
-                                    text: root.isMuted ? "Unmute" : "Mute"
-                                    color: root.isMuted ? (Theme.onError || "white") : Theme.surfaceText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    anchors.verticalCenter: parent.verticalCenter
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        const cmd = {cmd: "set_voice_settings"}
+                                        cmd[modelData.key] = !modelData.active
+                                        bridgeSocket.send(cmd)
+                                    }
                                 }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.sendBridgeCommand({cmd: "set_voice_settings", mute: !root.isMuted})
-                            }
-                        }
-
-                        Rectangle {
-                            width: (parent.width - Theme.spacingS) / 2
-                            height: 40
-                            radius: Theme.cornerRadius
-                            color: root.isDeafened ? Theme.error : Theme.surfaceContainerHigh
-
-                            Row {
-                                anchors.centerIn: parent
-                                spacing: Theme.spacingXS
-
-                                DankIcon {
-                                    name: root.isDeafened ? "headset_off" : "headset"
-                                    size: 18
-                                    color: root.isDeafened ? (Theme.onError || "white") : Theme.surfaceText
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                                StyledText {
-                                    text: root.isDeafened ? "Undeafen" : "Deafen"
-                                    color: root.isDeafened ? (Theme.onError || "white") : Theme.surfaceText
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    anchors.verticalCenter: parent.verticalCenter
-                                }
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.sendBridgeCommand({cmd: "set_voice_settings", deaf: !root.isDeafened})
                             }
                         }
                     }
                 }
 
-                // --- Authenticated, not in voice ---
                 Column {
                     visible: root.authenticated && !root.inVoice
                     width: parent.width

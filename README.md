@@ -11,7 +11,7 @@ git clone https://github.com/PandorasFox/dms-discord-widget.git \
   ~/.config/DankMaterialShell/plugins/discordVoice
 ```
 
-Requires `python3` (3.10+).
+Requires DMS 1.5+ and `python3` (3.10+).
 
 ## Setup
 

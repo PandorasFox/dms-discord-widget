@@ -11,10 +11,6 @@ import qs.Common
 Item {
     id: root
 
-    property var pluginService: null
-    property string pluginId: "discordVoice"
-
-    // --- Voice state (tracked for the IPC handler) ---
     property bool authenticated: false
     property var currentChannel: null
     property var voiceUsers: []
@@ -24,24 +20,16 @@ Item {
     readonly property bool isMuted: voiceSettings.mute || false
     readonly property bool isDeafened: voiceSettings.deaf || false
 
-    readonly property string clientId: "207646673902501888"
-
     readonly property string bridgeSocketPath: {
         const runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
         return runtime + "/dms-discord-voice.sock"
     }
 
-    function sendBridgeCommand(cmd) {
-        bridgeSocket.send(cmd)
-    }
-
-    // =====================================================================
     // Bridge process (single owner; extra spawns exit if socket is live)
-    // =====================================================================
 
     Process {
         id: bridgeProcess
-        command: ["python3", Qt.resolvedUrl("discord_bridge.py").toString().replace("file://", ""), root.bridgeSocketPath, root.clientId]
+        command: ["python3", Qt.resolvedUrl("discord_bridge.py").toString().replace("file://", ""), root.bridgeSocketPath]
         running: false
 
         stderr: StdioCollector {
@@ -73,7 +61,6 @@ Item {
         onTriggered: bridgeProcess.running = true
     }
 
-    // Watchdog: if the socket stays down and no bridge is running, start one.
     Timer {
         interval: 5000
         repeat: true
@@ -85,9 +72,18 @@ Item {
         }
     }
 
-    // =====================================================================
+    // The bridge is a plain relay: it doesn't retry on its own. DMS commonly
+    // starts before Discord is running, so while unauthenticated we keep
+    // asking it to try. `quiet` stops the bridge broadcasting an error per
+    // failed attempt; `connect` is idempotent in the bridge.
+    Timer {
+        interval: 5000
+        repeat: true
+        running: bridgeSocket.linkUp && !root.authenticated
+        onTriggered: bridgeSocket.send({cmd: "connect", quiet: true})
+    }
+
     // Socket client (DankSocket reconnects with backoff on its own)
-    // =====================================================================
 
     DankSocket {
         id: bridgeSocket
@@ -155,40 +151,38 @@ Item {
         }
     }
 
-    // =====================================================================
     // IPC handler (for keybinds: dms ipc call discord ...)
-    // =====================================================================
 
     IpcHandler {
         target: "discord"
 
         function toggleMute(): string {
-            root.sendBridgeCommand({cmd: "set_voice_settings", mute: !root.isMuted})
+            bridgeSocket.send({cmd: "set_voice_settings", mute: !root.isMuted})
             return root.isMuted ? "UNMUTED" : "MUTED"
         }
 
         function toggleDeafen(): string {
-            root.sendBridgeCommand({cmd: "set_voice_settings", deaf: !root.isDeafened})
+            bridgeSocket.send({cmd: "set_voice_settings", deaf: !root.isDeafened})
             return root.isDeafened ? "UNDEAFENED" : "DEAFENED"
         }
 
         function muteOn(): string {
-            root.sendBridgeCommand({cmd: "set_voice_settings", mute: true})
+            bridgeSocket.send({cmd: "set_voice_settings", mute: true})
             return "MUTE_ON"
         }
 
         function muteOff(): string {
-            root.sendBridgeCommand({cmd: "set_voice_settings", mute: false})
+            bridgeSocket.send({cmd: "set_voice_settings", mute: false})
             return "MUTE_OFF"
         }
 
         function deafenOn(): string {
-            root.sendBridgeCommand({cmd: "set_voice_settings", deaf: true})
+            bridgeSocket.send({cmd: "set_voice_settings", deaf: true})
             return "DEAFEN_ON"
         }
 
         function deafenOff(): string {
-            root.sendBridgeCommand({cmd: "set_voice_settings", deaf: false})
+            bridgeSocket.send({cmd: "set_voice_settings", deaf: false})
             return "DEAFEN_OFF"
         }
 
