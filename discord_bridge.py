@@ -379,6 +379,7 @@ class DiscordBridge:
         self.tokens = TokenManager()
         self.server = BridgeServer(socket_path)
         self.authenticated = False
+        self._discord_connected: bool = False
         self.current_user: dict[str, Any] = {}
         self.current_channel_id: str | None = None
         self.current_channel: dict[str, Any] | None = None
@@ -414,17 +415,19 @@ class DiscordBridge:
         await self.server.stop()
 
     async def _reconnect_loop(self) -> None:
-        """Keep trying to reach Discord in the background until authenticated.
+        """Keep trying to reach Discord in the background.
 
         The widget/daemon commonly starts before Discord is running (e.g. at
         login), or Discord gets restarted underneath us. Without this, the
         first connect attempt fails and the user is left having to click
         "Authorize" once Discord finally appears. Instead, whenever a client
-        is attached, we hold a previously-approved token, and we're not
-        already authenticated, silently retry connect + authenticate.
+        is attached, we poll to reach Discord: if a cached token exists we
+        auto-authenticate; otherwise we stay connected and wait for the user
+        to authorize (fresh authorization needs Discord's consent UI, which
+        must not be triggered unprompted).
 
-        We only retry when a cached token exists: fresh authorization needs
-        Discord's consent UI, which must not be triggered unprompted.
+        `_do_connect_flow(quiet=True)` is idempotent, so calling it every
+        interval is safe.
         """
         while not self._shutdown:
             await asyncio.sleep(RECONNECT_INTERVAL)
@@ -435,9 +438,6 @@ class DiscordBridge:
             # Auth already in flight; let it resolve before retrying.
             pending = self._pending.values()
             if "AUTHENTICATE" in pending or "AUTHORIZE" in pending:
-                continue
-            # No prior consent means we can't authenticate silently.
-            if not (self.tokens.access_token or self.tokens.load()):
                 continue
             try:
                 await self._do_connect_flow(quiet=True)
@@ -455,6 +455,10 @@ class DiscordBridge:
         wake; without a replay a late-joining client would show stale state
         until the next Discord event happened to fire.
         """
+        await self.server.send_to(writer, {
+            "type": "discord_status",
+            "connected": self._discord_connected,
+        })
         if not self.authenticated:
             return
         await self.server.send_to(writer, {
@@ -479,6 +483,12 @@ class DiscordBridge:
 
     # -- Discord connection --
 
+    async def _set_discord_connected(self, connected: bool) -> None:
+        if self._discord_connected == connected:
+            return
+        self._discord_connected = connected
+        await self.server.send({"type": "discord_status", "connected": connected})
+
     async def _connect_discord(self, quiet: bool = False) -> bool:
         """Connect and handshake with Discord.  Returns True on success.
 
@@ -487,16 +497,19 @@ class DiscordBridge:
         on every retry would spam the widget's log.
         """
         if not await self.discord.connect():
+            await self._set_discord_connected(False)
             if not quiet:
                 await self.server.send({"type": "error", "error": "Discord not running or IPC unavailable"})
             return False
         try:
             await self.discord.handshake(self.client_id)
             log.info("Discord handshake complete")
+            await self._set_discord_connected(True)
             return True
         except Exception as e:
             log.error("Handshake failed: %s", e)
             self.discord.close()
+            await self._set_discord_connected(False)
             if not quiet:
                 await self.server.send({"type": "error", "error": f"Handshake failed: {e}"})
             return False
@@ -528,6 +541,7 @@ class DiscordBridge:
             log.error("Discord read loop error: %s", e)
         finally:
             self.discord.close()
+            await self._set_discord_connected(False)
             self.authenticated = False
             self.current_user = {}
             self.current_channel_id = None
