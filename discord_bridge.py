@@ -32,6 +32,12 @@ log = logging.getLogger("discord-bridge")
 
 # Discord StreamKit public client ID (no secret needed).
 DEFAULT_CLIENT_ID = "207646673902501888"
+
+# Socket name prefixes for the official client builds. Only the official
+# client exposes the local IPC socket; third-party clients (Vesktop,
+# Legcord, Equibop, WebCord, ...) wrap the web app and do not create one,
+# so there is nothing to connect to for them.
+IPC_SOCKET_PREFIXES = ("discord", "discordptb", "discordcanary")
 OAUTH_SCOPES = ["rpc", "rpc.voice.read", "rpc.voice.write"]
 TOKEN_EXCHANGE_URL = "https://streamkit.discord.com/overlay/token"
 
@@ -80,9 +86,12 @@ class DiscordIPC:
 
         env_dirs.append("/tmp")
 
+        # Prefix order sets priority when several builds run at once:
+        # stable wins over PTB, PTB wins over Canary.
         for d in env_dirs:
-            for i in range(10):
-                paths.append(os.path.join(d, f"discord-ipc-{i}"))
+            for prefix in IPC_SOCKET_PREFIXES:
+                for i in range(10):
+                    paths.append(os.path.join(d, f"{prefix}-ipc-{i}"))
 
         return paths
 
