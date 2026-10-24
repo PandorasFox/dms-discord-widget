@@ -11,9 +11,6 @@ import qs.Common
 Item {
     id: root
 
-    property var pluginService: null
-    property string pluginId: "discordVoice"
-
     // --- Voice state (tracked for the IPC handler) ---
     property bool authenticated: false
     property var currentChannel: null
@@ -83,6 +80,17 @@ Item {
                 bridgeProcess.running = true
             }
         }
+    }
+
+    // The bridge is a plain relay: it doesn't retry on its own. DMS commonly
+    // starts before Discord is running, so while unauthenticated we keep
+    // asking it to try. `quiet` stops the bridge broadcasting an error per
+    // failed attempt; `connect` is idempotent in the bridge.
+    Timer {
+        interval: 5000
+        repeat: true
+        running: bridgeSocket.linkUp && !root.authenticated
+        onTriggered: root.sendBridgeCommand({cmd: "connect", quiet: true})
     }
 
     // =====================================================================
