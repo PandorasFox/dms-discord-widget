@@ -2,8 +2,9 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import qs.Common
+import qs.DCommon.Common
 import qs.Services
-import qs.Widgets
+import qs.DCommon.Widgets
 import qs.Modules.Plugins
 
 PluginComponent {
@@ -69,11 +70,11 @@ PluginComponent {
     onInVoiceChanged: updateVisibility()
     onAuthenticatedChanged: updateVisibility()
 
-    // DankSocket connection to bridge (the daemon surface owns the process)
+    // DSocket connection to bridge (the daemon surface owns the process)
     // Never log OAuth tokens: on systemd setups console output lands in
     // the journal, where any journal reader could lift a live token.
 
-    DankSocket {
+    DSocket {
         id: bridgeSocket
         path: root.bridgeSocketPath
         connected: false
@@ -92,7 +93,7 @@ PluginComponent {
     }
 
     // Connect socket after the daemon's bridge has had time to create its
-    // socket file. DankSocket retries with backoff until the bridge is up,
+    // socket file. DSocket retries with backoff until the bridge is up,
     // so a fixed delay is safe.
     Timer {
         id: socketConnectTimer
@@ -191,13 +192,13 @@ PluginComponent {
                 }
 
                 Behavior on border.color {
-                    DankColorAnim {
+                    DColorAnim {
                         duration: Theme.shorterDuration
                     }
                 }
             }
 
-            DankCircularImage {
+            DCircularImage {
                 anchors.fill: parent
                 anchors.margins: 2
                 imageSource: root.avatarUrl(modelData.id, modelData.avatar)
@@ -214,7 +215,7 @@ PluginComponent {
                 anchors.bottom: parent.bottom
                 anchors.right: parent.right
 
-                DankIcon {
+                DIcon {
                     anchors.centerIn: parent
                     name: (modelData.self_deaf || modelData.deaf) ? "headset_off" : "mic_off"
                     size: parent.width - 2
@@ -228,7 +229,7 @@ PluginComponent {
         Row {
             spacing: -4
 
-            DankIcon {
+            DIcon {
                 visible: !root.authenticated
                 anchors.verticalCenter: parent.verticalCenter
                 name: "headset_mic"
@@ -255,7 +256,7 @@ PluginComponent {
         Column {
             spacing: -4
 
-            DankIcon {
+            DIcon {
                 visible: !root.authenticated
                 anchors.horizontalCenter: parent.horizontalCenter
                 name: "headset_mic"
@@ -297,7 +298,7 @@ PluginComponent {
                     width: parent.width
                     spacing: Theme.spacingM
 
-                    DankIcon {
+                    DIcon {
                         id: authIcon
                         anchors.horizontalCenter: parent.horizontalCenter
                         name: root.discordConnected || root.authError.length > 0 ? "link" : "sync"
@@ -344,7 +345,7 @@ PluginComponent {
                             anchors.centerIn: parent
                             spacing: Theme.spacingS
 
-                            DankIcon {
+                            DIcon {
                                 name: "login"
                                 size: Theme.fontSizeMedium
                                 color: Theme.onPrimary
@@ -378,7 +379,7 @@ PluginComponent {
                         implicitHeight: Math.min(participantList.contentHeight, root.userListMaxHeight)
                         height: implicitHeight
 
-                        DankListView {
+                        DListView {
                             id: participantList
                             anchors.fill: parent
                             clip: true
@@ -397,7 +398,7 @@ PluginComponent {
                                     anchors.margins: Theme.spacingS
                                     spacing: Theme.spacingS
 
-                                    DankCircularImage {
+                                    DCircularImage {
                                         width: 32
                                         height: 32
                                         anchors.verticalCenter: parent.verticalCenter
@@ -422,13 +423,13 @@ PluginComponent {
                                         anchors.verticalCenter: parent.verticalCenter
                                         spacing: 2
 
-                                        DankIcon {
+                                        DIcon {
                                             visible: modelData.self_mute || modelData.mute
                                             name: "mic_off"
                                             size: 16
                                             color: Theme.error
                                         }
-                                        DankIcon {
+                                        DIcon {
                                             visible: modelData.self_deaf || modelData.deaf
                                             name: "headset_off"
                                             size: 16
@@ -461,7 +462,7 @@ PluginComponent {
                                     anchors.centerIn: parent
                                     spacing: Theme.spacingXS
 
-                                    DankIcon {
+                                    DIcon {
                                         name: modelData.active ? modelData.iconOn : modelData.iconOff
                                         size: 18
                                         color: modelData.active ? (Theme.onError || "white") : Theme.surfaceText
