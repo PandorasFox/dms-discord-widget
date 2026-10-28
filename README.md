@@ -8,10 +8,10 @@ Install from the DMS Plugin Browser (Settings > Plugins), or manually:
 
 ```bash
 git clone https://github.com/PandorasFox/dms-discord-widget.git \
-  ~/.config/DankMaterialShell/plugins/discordVoice
+  ~/.config/dms/plugins/discordVoice
 ```
 
-Requires DMS 1.5+ and `python3` (3.10+).
+Requires DMS 2.0+ and `python3` (3.10+).
 
 ## Setup
 

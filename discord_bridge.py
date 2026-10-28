@@ -3,7 +3,7 @@
 
 Connects to Discord's local Unix socket IPC, handles authentication,
 subscribes to voice events, and exposes state + controls via a JSON-lines
-Unix socket that the QML plugin connects to with DankSocket.
+Unix socket that the QML plugin connects to with DSocket.
 
 Dependencies: Python 3.10+ stdlib only.
 """
@@ -168,7 +168,7 @@ class TokenManager:
 
     def __init__(self) -> None:
         xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-        self._cache_path = os.path.join(xdg_cache, "DankMaterialShell", "discord_token.json")
+        self._cache_path = os.path.join(xdg_cache, "dms", "discord_token.json")
         self.access_token: str | None = None
 
     def load(self) -> str | None:
