@@ -1,8 +1,9 @@
 {
     "id": "discordVoice",
     "name": "Discord Voice Widget",
-    "description": "Show Discord voice channel participants in DankBar with speaking/mute indicators and voice controls. Requires DMS 1.5+.",
-    "version": "1.3.2",
+    "description": "Show Discord voice channel participants in DankBar with speaking/mute indicators and voice controls. Requires DMS 2.0+.",
+    "version": "1.4.0",
+    "requires_dms": ">=2.0.0",
     "author": "PandorasFox",
     "type": "widget",
     "capabilities": [

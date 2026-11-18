@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import qs.Common
+import qs.DCommon.Common
 
 // Daemon surface: instantiated exactly once by DMSShell, independent of
 // bar windows. Owns the bridge process, token persistence, and the IPC
@@ -83,9 +83,9 @@ Item {
         onTriggered: bridgeSocket.send({cmd: "connect", quiet: true})
     }
 
-    // Socket client (DankSocket reconnects with backoff on its own)
+    // Socket client (DSocket reconnects with backoff on its own)
 
-    DankSocket {
+    DSocket {
         id: bridgeSocket
         path: root.bridgeSocketPath
         connected: false
